@@ -8,7 +8,7 @@ The drone's physics were measured from recorded flights of a commercial FPV raci
 
 <sub>The same race in the game, four pilots started together at the finish gate. Top left: the human's best lap (his recorded line and speed, flown again by the controller so it could be filmed). Top right: a classic controller on the measured model. Bottom: the first RL policy, after three minutes of training, and the final one, which does three laps while the human does one. [Video (MP4)](media/game-race-grid.mp4).</sub>
 
-This repository publishes **the simulator engine, the base + residual model with the pipeline that fits it from flight logs, the training code, a synthetic track and a policy trained on it**, so everything here runs end to end. The real track and the model fitted to the real game are not published; nothing from the game itself is.
+This repository publishes **the simulator engine, the base + residual model with the pipeline that fits it from flight logs, the training code, a synthetic track and a policy trained on it**, so everything here runs end to end. The real track is not published, and nothing from the game itself is. The model of the real drone published here ([`models/telemetry.json`](models/telemetry.json)) was fitted from the game's official telemetry alone; the record laps below came from a more detailed internal model that is not published, and a policy trained only on the published one also flew the real race (see [below](#trained-on-the-published-model-flown-in-the-game)).
 
 ---
 
@@ -61,7 +61,7 @@ battery −= max(0, d2·u² + d3·u³) · dt
 
 ### Base + residual model (`sim/src/residual.rs`, `python/residual.py`)
 
-The model that made the policy transfer at racing speed had this shape: a simple physical base fitted by least squares, and a small network that learns what the equations miss. It is published here as code and as a pipeline, fitted on synthetic flights; the numbers fitted to the real game are not.
+The model that made the policy transfer at racing speed had this shape: a simple physical base fitted by least squares, and a small network that learns what the equations miss. It is published here as code and as a pipeline, with a synthetic demo and a version fitted on real flights from telemetry only.
 
 ```
 thrust    F   = u² · T(v_axial) · sag(battery) · ground(h)        T: a table over axial speed
@@ -85,6 +85,17 @@ residual  [dF, dA_lat, dA_axial, dA_fwd] = MLP(17 inputs)          17 -> 64 -> 6
 | 3-lap race of the final policy, filmed later | 0.76 m | **0.56 m** |
 
 <sub>Medians over every starting point, one each half second. On the fast straights one start in ten still drifts by metres (p90 3.9 m): the network has seen few seconds that fast.</sub>
+
+#### Trained on the published model, flown in the game
+
+The test that matters for a simulator: a policy trained only on `telemetry.json`, with the training code in this repository, then flown in the real game in real time through the virtual controller. The simulator's race time was predicted before each flight.
+
+| Policy | Predicted race (simulator) | Real race (game) | Laps |
+|---|---|---|---|
+| After the lap and race curriculum | 56.8 s | **56.7 s** | 17.5 / 19.3 / 19.9 s, 3 of 3, no contacts |
+| 40 more minutes of training | 50.1 s | **49.3 s** | 15.2 / 16.1 / 18.0 s, 3 of 3, no contacts |
+
+Both races were predicted to within 2 %. They are slower than the record of 13.8 s per lap above, which came from the more detailed internal model; the gap is training time and model detail, not transfer: the record policy, flown inside this simulator, races in 46.8 s against 45.9 s in the game.
 
 ### World (`sim/src/world.rs`)
 

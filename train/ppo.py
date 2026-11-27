@@ -64,10 +64,10 @@ class Agent(nn.Module):
         return torch.distributions.Normal(self.mean(o), self.log_std.exp().expand(o.shape[0], 4))
 
 
-def evaluate(ag, norm, dev, track=TRACK, n=32, steps=8000, margin=0.3):
-    """A 3-lap race from the start pad, full battery, nominal physics, mean action."""
+def evaluate(ag, norm, dev, track=TRACK, n=32, steps=8000, margin=0.3, model=""):
+    """A 3-lap race from the start pad, full battery, nominal physics (the training model if any), mean action."""
     E = fpv_sim.Racing(track, n, 12345, {"randomize": False, "delay": 2, "p_start": 1.0, "max_steps": steps,
-                                         "gate_margin": margin, "bat_fixed": 1.0, "race": True})
+                                         "gate_margin": margin, "bat_fixed": 1.0, "race": True, "model": model})
     o = torch.as_tensor(E.reset(), device=dev); alive = np.ones(n, bool)
     with torch.no_grad():
         for _ in range(steps):
@@ -177,7 +177,7 @@ def main():
                round(float(ep["laps"].mean()), 3) if has else "", round(float(ag.log_std.detach().exp().mean()), 3),
                round(vl.item(), 4), round(float(np.mean(kls)), 4)]
         if it % a.eval_every == 0:
-            ev = evaluate(ag, norm, dev, a.track)
+            ev = evaluate(ag, norm, dev, a.track, model=cfg_env.get("model", ""))
             row += [ev["best_lap"], ev["median_lap"], ev["crash_frac"], ev["laps_mean"], ev["race_frac"], ev["race_median"], ev["bat_end_median"]]
             fin = lambda x: -x if math.isfinite(x) else -float("inf")
             # finished races first, then faster races; before any race is finished: more laps, then a faster lap
