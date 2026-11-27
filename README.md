@@ -75,6 +75,17 @@ residual  [dF, dA_lat, dA_axial, dA_fwd] = MLP(17 inputs)          17 -> 64 -> 6
 
 ![Position error 1 s ahead, base only and base + residual](media/residual.png)
 
+**On real flights** ([`models/telemetry.json`](models/telemetry.json)). The same pipeline, fitted on 70 minutes of our own flights in the real game using **only its official telemetry** (no internal forces, no mass, no game constants; per unit mass, g = 9.81). Four flights were held out from both fits:
+
+| Held-out flight | Base only, 1 s ahead | Base + residual, 1 s ahead |
+|---|---|---|
+| Aggressive bench manoeuvres | 0.30 m | **0.07 m** |
+| Fast straights, up to 46 m/s | 2.43 m | **0.09 m** |
+| 3-lap race of the final policy, first night | 0.69 m | **0.53 m** |
+| 3-lap race of the final policy, filmed later | 0.76 m | **0.56 m** |
+
+<sub>Medians over every starting point, one each half second. On the fast straights one start in ten still drifts by metres (p90 3.9 m): the network has seen few seconds that fast.</sub>
+
 ### World (`sim/src/world.rs`)
 
 Height map (bilinear), oriented boxes, capsules and spheres with exact signed distances, an xz grid for broad phase, gates as oriented rectangles that count only when crossed in their direction, and a flight zone.
@@ -172,7 +183,7 @@ python/         fpv_sim_ref.py (numpy reference physics), residual.py (base + re
 train/ppo.py    PPO, one file
 tracks/         hillside.json + its height map
 policy/         the trained policy for hillside
-models/         demo.json, the base + residual model fitted by the demo
+models/         demo.json (fitted by the synthetic demo) and telemetry.json (fitted on real flights, telemetry only)
 tests/          equivalence, residual equivalence, world, throughput
 media/          figures and clips
 ```
