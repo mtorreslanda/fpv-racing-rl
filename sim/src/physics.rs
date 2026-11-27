@@ -61,6 +61,8 @@ pub struct Params {
     pub discharge: f64,
     /// body-plane drag as a·v + b·|v|·v (the high-speed fit) instead of a·v + b·v|v| per axis
     pub drag_v04: bool,
+    /// scale of the base aero when a residual model is used (randomisation; 1 = nominal)
+    pub k_aero: f64,
 }
 
 impl Params {
@@ -82,6 +84,7 @@ impl Params {
             battery: false,
             discharge: 1.0,
             drag_v04: false,
+            k_aero: 1.0,
         }
     }
 

@@ -8,7 +8,7 @@ The drone's physics were measured from recorded flights of a commercial FPV raci
 
 <sub>The same race in the game, four pilots started together at the finish gate. Top left: the human's best lap (his recorded line and speed, flown again by the controller so it could be filmed). Top right: a classic controller on the measured model. Bottom: the first RL policy, after three minutes of training, and the final one, which does three laps while the human does one. [Video (MP4)](media/game-race-grid.mp4).</sub>
 
-This repository publishes **the simulator engine, the training code, a synthetic track and a policy trained on it**, so everything here runs end to end. The real track and the model fitted to the real game are not published; nothing from the game itself is.
+This repository publishes **the simulator engine, the base + residual model with the pipeline that fits it from flight logs, the training code, a synthetic track and a policy trained on it**, so everything here runs end to end. The real track and the model fitted to the real game are not published; nothing from the game itself is.
 
 ---
 
@@ -59,6 +59,22 @@ battery −= max(0, d2·u² + d3·u³) · dt
 
 `v0.2` is the model validated on hover, steps and laps (1 s ahead: 4 cm on manoeuvres); `v0.4` adds the battery and the high-speed drag refit on straights and slaloms up to 46 m/s. The battery sag curve here is a generic LiPo-like one.
 
+### Base + residual model (`sim/src/residual.rs`, `python/residual.py`)
+
+The model that made the policy transfer at racing speed had this shape: a simple physical base fitted by least squares, and a small network that learns what the equations miss. It is published here as code and as a pipeline, fitted on synthetic flights; the numbers fitted to the real game are not.
+
+```
+thrust    F   = u² · T(v_axial) · sag(battery) · ground(h)        T: a table over axial speed
+aero      A_k = a·v_k + b·v_k|v_k| + c·|V|·v_k + d·F·v_k + e·F     body axes k = lateral, axial, forward
+residual  [dF, dA_lat, dA_axial, dA_fwd] = MLP(17 inputs)          17 -> 64 -> 64 -> 4, tanh
+```
+
+`fit_base` fits the thrust table and the fifteen aero coefficients by alternating least squares; `train_residual` fits the network on what the base leaves unexplained; `error_ahead` judges the result the only way that matters for a simulator, by how far a whole trajectory drifts after one second, on flights held out from both fits. Give it your own flight logs (position, velocity, attitude, rates, sticks, battery at 100 Hz) and it writes a JSON model; give that JSON to the environment (`cfg={"model": "models/yours.json"}`) and the policy trains on it, with the network's correction and a constant force randomised per episode (`res_min`, `res_max`, `bias_n`).
+
+**The demo** ([`python/residual_demo.py`](python/residual_demo.py)) hides a "true" drone behind 200 synthetic flights: the identified physics plus two things the base cannot express, motors that take about 45 ms to spin up and a side force when yawing at speed. Seeing only the logs, the pipeline cuts the error 1 s ahead on held-out flights from **0.82 m to 0.15 m** (median; p90 2.94 → 0.37 m).
+
+![Position error 1 s ahead, base only and base + residual](media/residual.png)
+
 ### World (`sim/src/world.rs`)
 
 Height map (bilinear), oriented boxes, capsules and spheres with exact signed distances, an xz grid for broad phase, gates as oriented rectangles that count only when crossed in their direction, and a flight zone.
@@ -87,6 +103,7 @@ env.episodes()                                     # laps, best lap, race time, 
 |---|---|---|
 | `test_equivalence.py` | Rust physics vs the numpy reference, 3,000 steps of smooth flight and of random stick steps with flips | max position error **5e-13 m**; Rust ~600× faster |
 | `test_world.py` | Signed distances, terrain and collision verdicts vs an independent numpy implementation, 6,000+ points | max distance error 3e-14 m; **0** disagreements |
+| `test_residual.py` | The base + residual step, network included, Rust vs numpy; a race run on the model | max position error **3e-13 m** |
 | `bench.py` | Batched throughput, random actions (worst case: constant crashes and resets) | see below |
 
 | Parallel races | Decisions / s | Physics steps / s | Flight time simulated per second |
@@ -139,6 +156,9 @@ python train/ppo.py --name races --minutes 25 --init runs/laps/last.pt --warmup 
     --cfg '{"race": true, "p_start": 0.3, "bat_min": 0.3, "margin": 0.3, "max_steps": 6000}'
 
 python python/render.py race policy/hillside.pt         # fly the published policy and draw it
+
+python python/residual_demo.py                          # fit a base + residual model from synthetic flights
+python tests/test_residual.py                           # Rust = numpy for that model
 ```
 
 On the real track, training from scratch directly on full races did not work either: after an hour the policy still crashed at the same gate. Learning to lap first, then to race, did.
@@ -146,12 +166,14 @@ On the real track, training from scratch directly on full races did not work eit
 ## Layout
 
 ```
-sim/            Rust crate fpv_sim: physics.rs, world.rs, env.rs, lib.rs (PyO3 bindings)
-python/         fpv_sim_ref.py (numpy reference physics), make_track.py, render.py
+sim/            Rust crate fpv_sim: physics.rs, residual.rs, world.rs, env.rs, lib.rs (PyO3 bindings)
+python/         fpv_sim_ref.py (numpy reference physics), residual.py (base + residual: model, fit, validation),
+                residual_demo.py, make_track.py, render.py
 train/ppo.py    PPO, one file
 tracks/         hillside.json + its height map
 policy/         the trained policy for hillside
-tests/          equivalence, world, throughput
+models/         demo.json, the base + residual model fitted by the demo
+tests/          equivalence, residual equivalence, world, throughput
 media/          figures and clips
 ```
 

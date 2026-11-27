@@ -3,6 +3,7 @@
 
 pub mod env;
 pub mod physics;
+pub mod residual;
 pub mod world;
 
 use env::{Batch, Cfg, Env, OBS};
@@ -76,6 +77,10 @@ fn read_cfg(d: Option<&Bound<'_, PyDict>>) -> PyResult<Cfg> {
                 "k_finish" => c.k_finish = v.extract()?,
                 "margin" => c.margin = v.extract()?,
                 "k_time" => c.k_time = v.extract()?,
+                "res_min" => c.res_min = v.extract()?,
+                "res_max" => c.res_max = v.extract()?,
+                "bias_n" => c.bias_n = v.extract()?,
+                "model" => {}
                 _ => return Err(PyValueError::new_err(format!("unknown config key: {k}"))),
             }
         }
@@ -99,11 +104,20 @@ impl Racing {
     #[pyo3(signature = (track, n, seed=0, cfg=None))]
     fn new(track: &str, n: usize, seed: u64, cfg: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let world = Arc::new(World::load(track).map_err(PyValueError::new_err)?);
+        let mut model = None;
+        if let Some(d) = cfg {
+            if let Some(v) = d.get_item("model")? {
+                let path: String = v.extract()?;
+                if !path.is_empty() {
+                    model = Some(Arc::new(residual::Model::load(&path).map_err(PyValueError::new_err)?));
+                }
+            }
+        }
         let cfg = read_cfg(cfg)?;
         let envs = (0..n)
             .map(|i| Env::new(seed.wrapping_mul(0x2545F4914F6CDD1D) ^ (i as u64).wrapping_mul(0x9E3779B97F4A7C15)))
             .collect();
-        Ok(Racing { b: Batch { world, cfg, envs } })
+        Ok(Racing { b: Batch { world, model, cfg, envs } })
     }
 
     #[getter]
@@ -154,6 +168,7 @@ impl Racing {
         let mut of = vec![0f32; n * OBS];
         {
             let (m, c) = (&self.b.world, &self.b.cfg);
+            let md = self.b.model.as_deref();
             let envs = &mut self.b.envs;
             py.detach(|| {
                 envs.par_iter_mut()
@@ -164,7 +179,7 @@ impl Racing {
                     .zip(o.par_chunks_mut(OBS))
                     .zip(of.par_chunks_mut(OBS))
                     .for_each(|((((((e, ai), ri), tei), tri), oi), ofi)| {
-                        let (rr, t1, t2) = e.step(m, c, *ai);
+                        let (rr, t1, t2) = e.step(m, md, c, *ai);
                         *ri = rr as f32;
                         *tei = t1;
                         *tri = t2;
@@ -224,7 +239,8 @@ impl Racing {
         let a = a.as_slice()?;
         let m = self.b.world.clone();
         let c = self.b.cfg.clone();
-        Ok(self.b.envs[i].step(&m, &c, [a[0], a[1], a[2], a[3]]))
+        let md = self.b.model.clone();
+        Ok(self.b.envs[i].step(&m, md.as_deref(), &c, [a[0], a[1], a[2], a[3]]))
     }
 
     fn state<'py>(&self, py: Python<'py>, i: usize) -> Bound<'py, PyArray1<f64>> {
@@ -264,9 +280,41 @@ impl Racing {
     }
 }
 
+/// Open loop with the base + residual model (equivalence with python/residual.py): state0 [14], sticks (N, 4),
+/// prev0 [4], heights (N) over the ground, the model JSON. No battery drain (as the reference).
+#[pyfunction]
+fn simulate_open_loop_model<'py>(
+    py: Python<'py>,
+    state0: PyReadonlyArray1<'py, f64>,
+    sticks: PyReadonlyArray2<'py, f64>,
+    prev0: PyReadonlyArray1<'py, f64>,
+    heights: PyReadonlyArray1<'py, f64>,
+    model: &str,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let md = residual::Model::load(model).map_err(PyValueError::new_err)?;
+    let mut st = to_state(state0.as_slice()?);
+    let a = sticks.as_array();
+    let hs = heights.as_slice()?;
+    let pp = prev0.as_slice()?;
+    let mut prev = [pp[0], pp[1], pp[2], pp[3]];
+    let par = Params::v02();
+    let n = a.nrows();
+    let mut out = numpy::ndarray::Array2::<f64>::zeros((n, 14));
+    for k in 0..n {
+        let inp = [a[[k, 0]], a[[k, 1]], a[[k, 2]], a[[k, 3]]];
+        residual::step_residual(&mut st, &inp, &prev, &par, &md, hs[k], 1.0, 1.0, 1.0, &[0.0; 3]);
+        prev = inp;
+        for (j, x) in from_state(&st).iter().enumerate() {
+            out[[k, j]] = *x;
+        }
+    }
+    Ok(out.into_pyarray(py))
+}
+
 #[pymodule]
 fn fpv_sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(simulate_open_loop, m)?)?;
+    m.add_function(wrap_pyfunction!(simulate_open_loop_model, m)?)?;
     m.add_class::<Racing>()?;
     Ok(())
 }

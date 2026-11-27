@@ -3,6 +3,7 @@
 //! `delay` steps (thrust) and delay + 1 (rotation), as measured on the real controller-to-telemetry loop.
 
 use crate::physics::{dot, norm, qmul, rotate, step, Params, State, DT, V3};
+use crate::residual::{step_residual, Model};
 use crate::world::{End, World};
 use std::sync::Arc;
 
@@ -42,6 +43,11 @@ pub struct Cfg {
     pub margin: f64,
     /// per-decision time penalty (0 = none)
     pub k_time: f64,
+    /// with a residual model: the network's correction scaled by U(res_min, res_max) and a constant body-frame force
+    /// N(0, bias_n) per axis, per episode (train for the uncertainty the model still has)
+    pub res_min: f64,
+    pub res_max: f64,
+    pub bias_n: f64,
 }
 
 impl Default for Cfg {
@@ -67,6 +73,9 @@ impl Default for Cfg {
             k_finish: 20.0,
             margin: 0.0,
             k_time: 0.0,
+            res_min: 1.0,
+            res_max: 1.0,
+            bias_n: 0.0,
         }
     }
 }
@@ -108,6 +117,8 @@ pub struct Env {
     ret: f64,
     pub end: End,
     pub finished: Vec<Episode>,
+    pub k_res: f64,
+    pub bias: [f64; 3],
 }
 
 #[inline]
@@ -152,6 +163,8 @@ impl Env {
             ret: 0.0,
             end: End::None,
             finished: Vec::new(),
+            k_res: 1.0,
+            bias: [0.0; 3],
         }
     }
 
@@ -190,6 +203,7 @@ impl Env {
         if cfg.randomize {
             par.t0 *= unif(s, 0.95, 1.05);
             let k = unif(s, 0.8, 1.2);
+            par.k_aero = k;
             par.fz = [par.fz[0] * k, par.fz[1] * k];
             par.fx = [par.fx[0] * k, par.fx[1] * k];
             par.k_ax *= k;
@@ -248,10 +262,22 @@ impl Env {
         self.par = par;
         self.set(m, st, [THR_HOVER, 0.0, 0.0, 0.0], gate, delay);
         self.laps_target = target;
+        let s = &mut self.rng;
+        if cfg.randomize {
+            self.k_res = unif(s, cfg.res_min, cfg.res_max);
+            for k in 0..3 {
+                // roughly normal (sum of three uniforms, variance 1)
+                let z = unif(s, -1.0, 1.0) + unif(s, -1.0, 1.0) + unif(s, -1.0, 1.0);
+                self.bias[k] = cfg.bias_n * z;
+            }
+        } else {
+            self.k_res = 1.0;
+            self.bias = [0.0; 3];
+        }
     }
 
     /// One policy decision. Returns (reward, terminated, truncated); does not reset.
-    pub fn step(&mut self, m: &World, cfg: &Cfg, a: [f64; 4]) -> (f64, bool, bool) {
+    pub fn step(&mut self, m: &World, model: Option<&Model>, cfg: &Cfg, a: [f64; 4]) -> (f64, bool, bool) {
         let a = [a[0].clamp(-1.0, 1.0), a[1].clamp(-1.0, 1.0), a[2].clamp(-1.0, 1.0), a[3].clamp(-1.0, 1.0)];
         let mut r = 0.0;
         for _ in 0..cfg.decim {
@@ -259,7 +285,13 @@ impl Env {
             let inp = self.hist[(self.t - self.delay) % HIST];
             let prev = self.hist[(self.t - self.delay - 1) % HIST];
             let p0 = self.st.p;
-            step(&mut self.st, &inp, &prev, &self.par);
+            match model {
+                Some(md) => {
+                    let h = self.st.p[1] - m.terrain.height(self.st.p[0], self.st.p[2]);
+                    step_residual(&mut self.st, &inp, &prev, &self.par, md, h, self.par.t0 / 108.59, self.par.k_aero, self.k_res, &self.bias);
+                }
+                None => step(&mut self.st, &inp, &prev, &self.par),
+            }
             self.t += 1;
             self.time += DT;
             if m.crosses(self.gate, &p0, &self.st.p, cfg.gate_margin) {
@@ -383,6 +415,8 @@ impl Env {
 
 pub struct Batch {
     pub world: Arc<World>,
+    /// base + residual model (python/residual.py); None = the identified physics of physics.rs
+    pub model: Option<Arc<Model>>,
     pub cfg: Cfg,
     pub envs: Vec<Env>,
 }
