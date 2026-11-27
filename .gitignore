@@ -1,0 +1,7 @@
+# build
+sim/target/
+*.pyd
+*.so
+__pycache__/
+# training runs (the published policy is copied to policy/)
+runs/
